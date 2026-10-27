@@ -28,6 +28,7 @@ extension ThreadStatus {
         switch self {
         case .pendingApproval: NSColor(red: 0.99, green: 0.83, blue: 0.30, alpha: 1) // amber
         case .awaitingInput: NSColor(red: 0.65, green: 0.71, blue: 0.99, alpha: 1)   // indigo
+        case .guestRequest: NSColor(red: 0.94, green: 0.67, blue: 0.99, alpha: 1)    // fuchsia
         case .working, .connecting: NSColor(red: 0.49, green: 0.83, blue: 0.99, alpha: 1) // sky
         case .waiting, .idle: NSColor.white.withAlphaComponent(0.5)                  // muted
         case .failed: NSColor(red: 0.99, green: 0.65, blue: 0.65, alpha: 1)          // red

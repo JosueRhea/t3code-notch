@@ -317,7 +317,7 @@ final class CompactBar: NSView {
     }
 
     private func leadStatus(_ active: [T3Thread]) -> ThreadStatus {
-        let order: [ThreadStatus] = [.pendingApproval, .awaitingInput, .working, .connecting, .waiting]
+        let order: [ThreadStatus] = [.pendingApproval, .awaitingInput, .guestRequest, .working, .connecting, .waiting]
         return order.first { s in active.contains { $0.status == s } } ?? .working
     }
 
@@ -446,7 +446,7 @@ final class StatusIndicator: NSView {
         shown = (status, small)
         let color = status.color
         dots.isHidden = !(status == .working || status == .connecting)
-        pulse.isHidden = !status.needsYou
+        pulse.isHidden = !(status.needsYou || status == .guestRequest)
         let symbol: String? = switch status {
         case .waiting: "hourglass"
         case .failed: "xmark.circle.fill"

@@ -56,6 +56,28 @@ import Testing
         #expect(t.status == .idle)
     }
 
+    @Test func awaitedBackgroundCommandIsWaiting() {
+        // Newer T3: work the agent marks `awaited` holds the thread as Waiting whatever its kind.
+        let t = shell(["status": "completed", "latestRunCompletedAt": "2026-10-27T20:00:00.000Z",
+                       "lastVisitedAt": "2026-10-27T20:00:00.000Z",
+                       "pendingBackgroundTasks": [["taskId": "b1", "kind": "command", "awaited": true,
+                                                   "description": "Wait for Vercel web deploy"]]])
+        #expect(t.status == .waiting)
+        #expect(t.waitingOn == "Wait for Vercel web deploy")
+    }
+
+    @Test func pendingGuestMessageIsGuestRequest() {
+        let t = shell(["status": "completed", "latestRunCompletedAt": "2026-10-27T20:00:00.000Z",
+                       "pendingGuestMessageCount": 2])
+        #expect(t.status == .guestRequest)
+    }
+
+    @Test func approvalOutranksGuestRequest() {
+        let t = shell(["status": "running", "activityRunStatus": "running", "pendingGuestMessageCount": 1,
+                       "pendingRuntimeRequest": ["id": "r1", "kind": "command", "createdAt": "2026-10-27T20:00:00.000Z"]])
+        #expect(t.status == .pendingApproval)
+    }
+
     @Test(arguments: ["preparing", "starting", "queued"])
     func startingUpIsConnecting(_ status: String) {
         #expect(shell(["status": status, "activityRunStatus": status]).status == .connecting)

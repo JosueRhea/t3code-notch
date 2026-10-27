@@ -8,7 +8,7 @@ private let log = Logger(subsystem: "dev.custom-dock.t3notch", category: "thread
 /// Mirrors T3 Code's sidebar status pill (`resolveThreadStatusPill` in apps/web
 /// Sidebar.logic.ts), same names, same priority order.
 enum ThreadStatus: Equatable, Sendable {
-    case pendingApproval, awaitingInput, working, connecting, waiting, failed, planReady, completed
+    case pendingApproval, awaitingInput, guestRequest, working, connecting, waiting, failed, planReady, completed
     /// No pill in T3: finished and already seen, stopped, or never run.
     case idle
 
@@ -16,6 +16,7 @@ enum ThreadStatus: Equatable, Sendable {
         switch self {
         case .pendingApproval: "Pending Approval"
         case .awaitingInput: "Awaiting Input"
+        case .guestRequest: "Guest Request"
         case .working: "Working"
         case .connecting: "Connecting"
         case .waiting: "Waiting"
@@ -31,7 +32,7 @@ enum ThreadStatus: Equatable, Sendable {
     /// A run is actually in flight (stop / steer apply).
     var isBusy: Bool { self == .working || self == .connecting || self == .waiting }
     /// Shows up in the collapsed live ticker.
-    var isActive: Bool { needsYou || isBusy }
+    var isActive: Bool { needsYou || isBusy || self == .guestRequest }
 }
 
 struct T3Thread: Identifiable, Equatable {
@@ -39,7 +40,7 @@ struct T3Thread: Identifiable, Equatable {
     let title: String
     let project: String
     let status: ThreadStatus
-    let startedAt: Date?
+    var startedAt: Date?
     let updatedAt: Date
     var runId: String?
     var model: String?
@@ -453,7 +454,9 @@ final class ThreadStore: ObservableObject {
         for (id, t) in shell where t.childRequest != nil && childRequests[id] == nil { shell[id]?.childRequest = nil }
 
         let candidates = shell.values.filter { !$0.isChild && !$0.archived && !$0.deleted }
-        func rank(_ s: ThreadStatus) -> Int { s.needsYou ? 0 : s == .waiting ? 2 : s.isBusy ? 1 : 3 }
+        func rank(_ s: ThreadStatus) -> Int {
+            s.needsYou || s == .guestRequest ? 0 : s == .waiting ? 2 : s.isBusy ? 1 : 3
+        }
         // Active threads stream updates constantly, so ordering them by `updatedAt` makes rows
         // swap places under the cursor. Order them by when their run started instead (stable).
         func key(_ t: ShellThread) -> Date { t.status.isActive ? (t.startedAt ?? t.updatedAt) : t.updatedAt }
@@ -486,6 +489,9 @@ final class ThreadStore: ObservableObject {
             model: s.model.map(Self.prettyModel), provider: s.provider, branch: s.branch, pullRequest: s.pullRequest
         )
         t.pr = s.pr
+        if s.status == .waiting, s.runtimeStatus == "idle", let done = s.latestRunCompletedAt {
+            t.startedAt = done // parked on background work: T3 counts from when the run finished
+        }
         t.usageLimited = s.usageLimited
         t.usageLimitResetAt = s.usageLimitResetAt
         guard let items = details[s.id]?.values.sorted(by: { $0.ordinal < $1.ordinal }) else { return t }
@@ -518,7 +524,9 @@ final class ThreadStore: ObservableObject {
         }
 
         let live = t.status.isActive
-        if live, let item = items.last(where: { !Self.quietTypes.contains($0.type) }) {
+        if t.status == .waiting, let task = s.waitingOn {
+            (t.activity, t.activityIcon) = (task, "hourglass")
+        } else if live, let item = items.last(where: { !Self.quietTypes.contains($0.type) }) {
             (t.activity, t.activityIcon) = Self.describe(item)
         } else if let message = t.lastMessage {
             (t.activity, t.activityIcon) = (Self.firstLine(message), "text.bubble")
@@ -931,6 +939,10 @@ struct ShellThread: Sendable {
     let latestRunCompletedAt: Date?
     let lastVisitedAt: Date?
     let blockedOnThreadWait, backgroundHoldsCompletion, planMode, hasActionableProposedPlan: Bool
+    /// Guest messages waiting for the owner to send or dismiss (newer servers).
+    let pendingGuestMessages: Int
+    /// What a parked thread is waiting on ("Wait for Vercel web deploy").
+    let waitingOn: String?
     let pr: PullRequestInfo?
     /// T3 keeps status "failed" for usage limits; the class says why.
     let usageLimited: Bool
@@ -946,6 +958,7 @@ struct ShellThread: Sendable {
     func resolveStatus() -> ThreadStatus {
         if hasPendingApprovals || childRequest == .pendingApproval { return .pendingApproval }
         if hasPendingUserInput || childRequest == .awaitingInput { return .awaitingInput }
+        if pendingGuestMessages > 0 { return .guestRequest }
         if (runtimeStatus == "running" && !blockedOnThreadWait) || runtimeStatus == "waiting" { return .working }
         if ["preparing", "starting", "queued"].contains(runtimeStatus) { return .connecting }
         if (runtimeStatus == "running" && blockedOnThreadWait) || backgroundHoldsCompletion { return .waiting }
@@ -1092,7 +1105,12 @@ enum Incoming: Sendable {
         // shellRuntime(): background work (subagent/monitor/task, not plain commands) parks the
         // run at idle; otherwise the activity run's status wins over the latest run's.
         let tasks = t["pendingBackgroundTasks"] as? [[String: Any]] ?? []
-        let holds = tasks.contains { ["subagent", "monitor", "background_task"].contains($0["kind"] as? String ?? "") }
+        // backgroundWorkHoldsCompletion(): awaited work of any kind, or subagent/monitor/task work.
+        func holdsCompletion(_ task: [String: Any]) -> Bool {
+            task["awaited"] as? Bool == true
+                || ["subagent", "monitor", "background_task"].contains(task["kind"] as? String ?? "")
+        }
+        let holds = tasks.contains(where: holdsCompletion)
         let parkAtIdle = holds && status != "failed"
         let hasRuntime = t["latestRunId"] is String || t["activeProviderThreadId"] is String || parkAtIdle
         let runtimeStatus: String? = !hasRuntime ? nil
@@ -1153,6 +1171,8 @@ enum Incoming: Sendable {
             backgroundHoldsCompletion: holds,
             planMode: t["interactionMode"] as? String == "plan",
             hasActionableProposedPlan: t["hasActionableProposedPlan"] as? Bool ?? false,
+            pendingGuestMessages: (t["pendingGuestMessageCount"] as? NSNumber)?.intValue ?? 0,
+            waitingOn: tasks.first(where: holdsCompletion)?["description"] as? String,
             pr: pullRequest(t),
             usageLimited: status == "failed" && t["lastErrorClass"] as? String == "usage_limit",
             usageLimitResetAt: date(t["usageLimitResetAt"])
