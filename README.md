@@ -18,6 +18,37 @@ And when a run finishes, its final message drops down for a few seconds:
 
 ![Finished](docs/screenshots/finished.png)
 
+## Performance
+
+It sits on screen all day, so it has to cost close to nothing. The first version was built in SwiftUI and used **~19% CPU** while agents ran. Rebuilding it on AppKit + Core Animation brought that under **1%**.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/performance-dark.png">
+  <img alt="Performance charts: CPU over one minute, memory over one minute, and CPU and wakeups at each step of the migration" src="docs/screenshots/performance-light.png">
+</picture>
+
+| | All SwiftUI (before) | AppKit + Core Animation (now) |
+|---|---|---|
+| Average CPU over a minute, 2 agents running | 18.8% (spikes to 42%) | **0.6%** |
+| Wakeups per second | 2,611 | **58** |
+| Memory over a minute | grew +3.8 MB | **no growth** (28 MB footprint) |
+| SwiftUI linked | yes | **no** |
+
+What made the difference, in order:
+
+| Step | Avg CPU | Wakeups/s | How it was measured |
+|---|---|---|---|
+| Original: all SwiftUI | 18.8% | 2,611 | `ps` every 5 s, 60 s |
+| Animated dots on Core Animation, audio engine stops between clicks, updates throttled | 6.0% | 240 | `ps` every 5 s, 60 s |
+| Status computed once per change, shared date parsers | 5.1% | | `top` per second, 90 s |
+| Collapsed notch redraws only when something visible changes | 4.0% | 773 | CPU time over 3 min |
+| Compact bar in AppKit, SwiftUI only while open | 0.54% | 19 | CPU time over 3 min |
+| **Everything AppKit + Core Animation, no SwiftUI** | **0.6%** | **58** | `ps` every 5 s, 60 s |
+
+Why it worked: SwiftUI re-lays out the whole view tree on every animation frame and every state change. For an always-visible, always-animating widget fed several updates a second, that was ~95% of the CPU. With Core Animation the window server runs the springs, slides and rolling digits, so the app does no work per frame.
+
+The original build can't be re-run, so its numbers are the ones recorded at the time. The before/after table uses the same method for both columns; the step table notes its method per row. The [interactive version](docs/performance.html) has hover details.
+
 ## Features
 
 - **Live compact bar:** the working thread's title, what it's doing (command, file edit, thinking), `+added −removed` lines and a timer. It rotates through working threads with a spring slide.
@@ -28,7 +59,7 @@ And when a run finishes, its final message drops down for a few seconds:
 - **Keyboard:** ⌘⇧Space opens it; ↑↓ select, ⏎ open, R reply, A/D approve/deny, 1–9 answer, Esc close.
 - **Cozy sounds:** a soft click when a run finishes, a tick-tock when an agent needs you.
 - **Private by default:** invisible to screen sharing, recordings and screenshots (toggle in the menu).
-- **Light on resources:** AppKit + Core Animation, no SwiftUI. Under 1% CPU while agents run, and no memory growth. [Performance notes](docs/performance.html).
+- **Light on resources:** AppKit + Core Animation, no SwiftUI. Under 1% CPU while agents run, and no memory growth (see [Performance](#performance)).
 
 ## Requirements
 
