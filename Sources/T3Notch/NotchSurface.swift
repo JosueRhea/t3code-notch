@@ -13,6 +13,11 @@ final class NotchRootView: NSView {
     private let model: NotchModel
     private let store: ThreadStore
     private let shape = CAShapeLayer()
+    /// The theme's background over the black shape, clipped to it (same springs). With a camera
+    /// notch it stays black around the camera and eases into the theme color over the whole panel
+    /// (a short fade read as a black band stuck on top).
+    private let backdrop = CAGradientLayer()
+    private let backdropMask = CAShapeLayer()
     private let compact: CompactBar
     private var content: NSView?
     private var contentKey = ""
@@ -36,11 +41,16 @@ final class NotchRootView: NSView {
         wantsLayer = true
         layer?.masksToBounds = false
         shape.fillColor = NSColor.black.cgColor
-        shape.shadowColor = NSColor.black.cgColor
+        shape.shadowColor = Theme.current.glowColor
         shape.shadowOpacity = 0
         shape.shadowRadius = 14
         shape.shadowOffset = CGSize(width: 0, height: 6)
         layer?.addSublayer(shape)
+        if let color = Theme.current.background?.cgColor {
+            backdrop.colors = model.hardwareNotch ? Self.easedFade(to: color) : [color, color]
+            backdrop.mask = backdropMask
+            layer?.addSublayer(backdrop)
+        }
         addSubview(compact)
     }
 
@@ -52,6 +62,12 @@ final class NotchRootView: NSView {
     override func layout() {
         super.layout()
         applied = nil // canvas changed: re-place everything without animating
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        backdrop.frame = bounds
+        backdropMask.frame = backdrop.bounds
+        CATransaction.commit()
+        fadeBackdrop(to: model.size)
         refresh(animated: false)
     }
 
@@ -80,7 +96,33 @@ final class NotchRootView: NSView {
                         offsetX: (bounds.width - size.width) / 2)
     }
 
+    private static let fadeSteps = 8
+
+    /// Black → theme color with ease-in-out stops, so there's no visible edge where it starts.
+    private static func easedFade(to color: CGColor) -> [CGColor] {
+        let target = NSColor(cgColor: color) ?? .black
+        return (0...fadeSteps).map { i in
+            let t = CGFloat(i) / CGFloat(fadeSteps)
+            let eased = t * t * (3 - 2 * t)
+            return (NSColor.black.blended(withFraction: eased, of: target) ?? target).cgColor
+        }
+    }
+
+    /// Fade from the bottom of the camera notch to the bottom of the shape at `size`.
+    private func fadeBackdrop(to size: CGSize) {
+        guard model.hardwareNotch, backdrop.superlayer != nil, bounds.height > 0 else { return }
+        let start = model.notchSize.height / bounds.height
+        let end = max(start + 0.01, min(1, size.height / bounds.height))
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        backdrop.locations = (0...Self.fadeSteps).map {
+            NSNumber(value: Double(start + (end - start) * CGFloat($0) / CGFloat(Self.fadeSteps)))
+        }
+        CATransaction.commit()
+    }
+
     private func setShape(size: CGSize, animated: Bool) {
+        fadeBackdrop(to: size)
         let newPath = path(for: size)
         let expanded = model.mode == .expanded
         if animated {
@@ -89,6 +131,7 @@ final class NotchRootView: NSView {
             spring.fromValue = from
             spring.toValue = newPath
             shape.add(spring, forKey: "path")
+            backdropMask.add(spring, forKey: "path")
             // The shadow's outline springs with the shape (otherwise it pops to the final size
             // before the notch has opened), and it only fades in once the shape is mostly grown.
             let shadowShape = Self.spring("shadowPath")
@@ -97,7 +140,7 @@ final class NotchRootView: NSView {
             shape.add(shadowShape, forKey: "shadowPath")
             let fade = CABasicAnimation(keyPath: "shadowOpacity")
             fade.fromValue = shape.presentation()?.shadowOpacity ?? shape.shadowOpacity
-            fade.toValue = expanded ? 0.45 : 0
+            fade.toValue = expanded ? Theme.current.glowOpacity : 0
             fade.duration = expanded ? 0.22 : 0.1
             if expanded {
                 fade.beginTime = CACurrentMediaTime() + 0.2
@@ -108,9 +151,10 @@ final class NotchRootView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         shape.path = newPath
+        backdropMask.path = newPath
         shape.shadowPath = newPath
         // A shadow is a blur pass; only pay for it while it shows.
-        shape.shadowOpacity = expanded ? 0.45 : 0
+        shape.shadowOpacity = expanded ? Theme.current.glowOpacity : 0
         CATransaction.commit()
     }
 

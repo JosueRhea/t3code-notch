@@ -22,14 +22,14 @@ enum NotchShape {
     }
 }
 
-/// T3's pill colors (Tailwind 300-ish shades used in its dark sidebar).
+/// T3's pill colors (Tailwind 300-ish shades used in its dark sidebar); Working follows the theme.
 extension ThreadStatus {
     var color: NSColor {
         switch self {
         case .pendingApproval: NSColor(red: 0.99, green: 0.83, blue: 0.30, alpha: 1) // amber
         case .awaitingInput: NSColor(red: 0.65, green: 0.71, blue: 0.99, alpha: 1)   // indigo
         case .guestRequest: NSColor(red: 0.94, green: 0.67, blue: 0.99, alpha: 1)    // fuchsia
-        case .working, .connecting: NSColor(red: 0.49, green: 0.83, blue: 0.99, alpha: 1) // sky
+        case .working, .connecting: Theme.current.working                            // sky, or the theme's accent
         case .waiting, .idle: NSColor.white.withAlphaComponent(0.5)                  // muted
         case .failed: NSColor(red: 0.99, green: 0.65, blue: 0.65, alpha: 1)          // red
         case .planReady: NSColor(red: 0.77, green: 0.71, blue: 0.99, alpha: 1)       // violet
@@ -41,7 +41,6 @@ extension ThreadStatus {
 enum Palette {
     static let added = NSColor(red: 0.43, green: 0.91, blue: 0.62, alpha: 1)
     static let removed = NSColor(red: 0.99, green: 0.55, blue: 0.55, alpha: 1)
-    static let amber = NSColor(red: 1.0, green: 0.78, blue: 0.45, alpha: 1) // primary buttons
 }
 
 enum NotchMode: Equatable { case idle, activity, peek, expanded }

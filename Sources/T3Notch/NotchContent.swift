@@ -91,15 +91,15 @@ final class PillButton: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     func setTitle(_ title: String) {
-        attributedTitle = UI.text(title, UI.font(pillHeight < 24 ? 10 : 11, .semibold), primary ? .black : .white)
+        attributedTitle = UI.text(title, UI.font(pillHeight < 24 ? 10 : 11, .semibold), primary ? Theme.current.onAccent : .white)
         restyle()
     }
 
     private func restyle() {
         layer?.backgroundColor = (destructive ? NSColor.systemRed.withAlphaComponent(0.85)
-            : primary ? Palette.amber.withAlphaComponent(0.92) : NSColor.white.withAlphaComponent(0.1)).cgColor
+            : primary ? Theme.current.accent.withAlphaComponent(0.92) : Theme.current.fill(0.1)).cgColor
         if let t = attributedTitle.mutableCopy() as? NSMutableAttributedString, t.length > 0 {
-            t.addAttribute(.foregroundColor, value: primary && !destructive ? NSColor.black : NSColor.white,
+            t.addAttribute(.foregroundColor, value: primary && !destructive ? Theme.current.onAccent : NSColor.white,
                            range: NSRange(location: 0, length: t.length))
             attributedTitle = t
         }
@@ -123,7 +123,7 @@ final class IconButton: NSButton {
         isBordered = false
         wantsLayer = true
         layer?.cornerRadius = size / 2
-        layer?.backgroundColor = filled ? NSColor.white.withAlphaComponent(0.1).cgColor : nil
+        layer?.backgroundColor = filled ? Theme.current.fill(0.1).cgColor : nil
         image = NSImage(systemSymbolName: symbol, accessibilityDescription: help)?
             .withSymbolConfiguration(.init(pointSize: glyph, weight: .bold))
         contentTintColor = NSColor.white.withAlphaComponent(0.75)
@@ -294,7 +294,7 @@ final class ThreadRowView: FlippedView {
         diff.wantsLayer = true
         terminal.wantsLayer = true
         terminal.layer?.cornerRadius = 8
-        terminal.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.06).cgColor
+        terminal.layer?.backgroundColor = Theme.current.fill(0.06).cgColor
         terminal.addSubview(terminalText)
         [title, replyButton, glyph, stop, time, meta, diff, tools, activity, terminal, actions].forEach(addSubview)
     }
@@ -311,7 +311,7 @@ final class ThreadRowView: FlippedView {
         thread = t
         let hover = model.hoveredRow == t.id
 
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(selected ? 0.14 : hover ? 0.1 : 0).cgColor
+        layer?.backgroundColor = selected || hover ? Theme.current.fill(selected ? 0.14 : 0.1).cgColor : nil
         layer?.borderWidth = selected ? 1 : 0
         layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
 
@@ -624,7 +624,7 @@ final class NeedsYouView: FlippedView {
         super.init(frame: .zero)
         codeBox.wantsLayer = true
         codeBox.layer?.cornerRadius = 8
-        codeBox.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
+        codeBox.layer?.backgroundColor = Theme.current.fill(0.07).cgColor
         codeBox.addSubview(code)
         [pulse, title, openButton, closeButton, reason, header, body, codeBox, actions].forEach(addSubview)
     }
@@ -746,7 +746,7 @@ final class ReplyBar: FlippedView, NSTextFieldDelegate {
         super.init(frame: .zero)
         box.wantsLayer = true
         box.layer?.cornerRadius = 10
-        box.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
+        box.layer?.backgroundColor = Theme.current.fill(0.08).cgColor
         icon.image = NSImage(systemSymbolName: "arrowshape.turn.up.left.fill", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 10, weight: .bold))
         icon.contentTintColor = NSColor.white.withAlphaComponent(0.4)
@@ -769,8 +769,8 @@ final class ReplyBar: FlippedView, NSTextFieldDelegate {
         field.placeholderAttributedString = UI.text(hint, UI.font(12), NSColor.white.withAlphaComponent(0.35))
         if field.stringValue != model.draft { field.stringValue = model.draft }
         let empty = model.draft.trimmingCharacters(in: .whitespaces).isEmpty
-        send.layer?.backgroundColor = (empty ? NSColor.white.withAlphaComponent(0.12) : Palette.amber).cgColor
-        send.contentTintColor = empty ? NSColor.white.withAlphaComponent(0.4) : .black
+        send.layer?.backgroundColor = (empty ? Theme.current.fill(0.12) : Theme.current.accent).cgColor
+        send.contentTintColor = empty ? NSColor.white.withAlphaComponent(0.4) : Theme.current.onAccent
         send.isEnabled = !empty
     }
 
@@ -826,7 +826,7 @@ final class KeyHintsView: FlippedView {
             cap.alignment = .center
             cap.wantsLayer = true
             cap.layer?.cornerRadius = 4
-            cap.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+            cap.layer?.backgroundColor = Theme.current.fill(0.12).cgColor
             let label = UI.label(UI.font(10), NSColor.white.withAlphaComponent(0.4))
             label.stringValue = text
             return [cap, label]

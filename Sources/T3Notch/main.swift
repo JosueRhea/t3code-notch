@@ -308,7 +308,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
+        Theme.start() // before the first panels, so they open already matching T3
         rebuildPanels()
+        NotificationCenter.default.addObserver(forName: Theme.didChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.rebuildPanels() } // views take their colors when built
+        }
 
         let handler: (NSEvent) -> Void = { [weak self] _ in
             MainActor.assumeIsolated {
@@ -434,6 +438,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         capture.toolTip = "Off (default): the notch never appears in Zoom/Meet shares, recordings or screenshots."
         menu.addItem(capture)
 
+        menu.addItem(themeMenu())
+
         let showModel = NSMenuItem(title: "Show Model", action: #selector(toggleShowModel), keyEquivalent: "")
         showModel.target = self
         showModel.state = Settings.showModel ? .on : .off
@@ -457,6 +463,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         open.target = self
         menu.addItem(open)
         menu.addItem(NSMenuItem(title: "Quit T3 Notch", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    /// Theme ▸ Match T3 Code (Ember) / Classic / T3's palettes.
+    private func themeMenu() -> NSMenuItem {
+        let sub = NSMenu()
+        let choice = ThemeChoice.saved
+        func add(_ title: String, _ value: ThemeChoice, on: Bool) {
+            let item = NSMenuItem(title: title, action: #selector(pickTheme(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = value
+            item.state = on ? .on : .off
+            sub.addItem(item)
+        }
+        add("Match T3 Code (\(Theme.detected.label))", .matchT3, on: choice == .matchT3)
+        sub.addItem(.separator())
+        for theme in [NotchTheme.classic] + NotchTheme.t3 {
+            add(theme.label, .fixed(theme.id), on: choice == .fixed(theme.id))
+        }
+        let item = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
+        item.submenu = sub
+        return item
+    }
+
+    @objc private func pickTheme(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? ThemeChoice else { return }
+        // Defer so we don't tear down the panel whose menu is still unwinding.
+        DispatchQueue.main.async { Theme.choose(choice) }
     }
 
     private func showSettings(from screen: NSScreen) {

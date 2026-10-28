@@ -57,6 +57,7 @@ The original build can't be re-run, so its numbers are the ones recorded at the 
 - **Live terminal:** hover a running command to watch its last lines stream in.
 - **At a glance:** branch, model with the provider's logo, PR number with CI checks / review / conflict markers, and a usage-limit countdown.
 - **Keyboard:** ⌘⇧Space opens it; ↑↓ select, ⏎ open, R reply, A/D approve/deny, 1–9 answer, Esc close.
+- **Matches your T3 theme:** background, buttons, cards, the glow and the Working color follow T3's palette (T3 Chat, Grove, Ocean, Ember, Iris) live. Around a camera notch the top stays black and fades into the theme color. Pick one yourself under Theme in the menu.
 - **Cozy sounds:** a soft click when a run finishes, a tick-tock when an agent needs you.
 - **Private by default:** invisible to screen sharing, recordings and screenshots (toggle in the menu).
 - **Light on resources:** AppKit + Core Animation, no SwiftUI. Under 1% CPU while agents run, and no memory growth (see [Performance](#performance)).
@@ -75,7 +76,7 @@ open T3Notch.app
 swift test          # status, wire-format and diff-count tests
 ```
 
-The menu-bar icon has the settings: which display(s) to show it on, sounds, screen-sharing visibility, model display, and Launch at Login.
+The menu-bar icon has the settings: which display(s) to show it on, sounds, screen-sharing visibility, theme, model display, and Launch at Login.
 
 ## How it connects
 
