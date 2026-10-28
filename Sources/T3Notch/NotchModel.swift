@@ -73,7 +73,7 @@ final class NotchModel: ObservableObject {
     static let actionBarHeight: CGFloat = 40 // approve / answer buttons under a waiting row
     static let replyHeight: CGFloat = 44
     static let hintsHeight: CGFloat = 24
-    static let wing: CGFloat = 150 // side area next to the hardware notch in activity mode
+    static let wing: CGFloat = 190 // side area next to the hardware notch in activity mode
 
     init(notchSize: CGSize, hardwareNotch: Bool, store: ThreadStore) {
         self.notchSize = notchSize

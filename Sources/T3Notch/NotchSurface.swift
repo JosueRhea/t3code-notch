@@ -375,18 +375,26 @@ final class CompactBar: NSView {
         }
         let tw = fit(timer)
         if tw > 0 { right -= 8 + tw; place(timer, x: right, w: tw, vh: 14) }
-        if !diff.isHidden { let dw = fit(diff); right -= 8 + dw; place(diff, x: right, w: dw, vh: 14) }
+        // Next to a camera notch the diff goes in the left wing (after the title), so the right
+        // wing has room for the activity.
+        let dw = diff.isHidden ? 0 : fit(diff)
+        if dw > 0, !model.hardwareNotch { right -= 8 + dw; place(diff, x: right, w: dw, vh: 14) }
 
         let left = inset + 28
+        featured.frame = CGRect(x: left, y: 0, width: max(0, right - 8 - left), height: h)
         if model.hardwareNotch {
-            // Title in the left wing; the camera sits in the middle.
-            let wingEnd = (bounds.width - model.notchSize.width) / 2 - 4
-            featured.frame = CGRect(x: left, y: 0, width: max(0, wingEnd - left), height: h)
-            place(title, x: 0, w: featured.frame.width, vh: 15)
-            icon.isHidden = true
-            activity.isHidden = true
+            // The camera sits in the middle: title in the left wing, activity in the right one.
+            let wingEnd = (bounds.width - model.notchSize.width) / 2 - 4 - left
+            let wingStart = (bounds.width + model.notchSize.width) / 2 + 8 - left
+            let titleW = min(fit(title), wingEnd - (dw > 0 ? dw + 8 : 0))
+            place(title, x: 0, w: titleW, vh: 15)
+            if dw > 0 { place(diff, x: left + titleW + 8, w: dw, vh: 14) }
+            let room = featured.frame.width - wingStart - 15
+            icon.isHidden = room < 40
+            activity.isHidden = room < 40
+            place(icon, x: wingStart, w: 11, vh: 11)
+            place(activity, x: wingStart + 15, w: room, vh: 14)
         } else {
-            featured.frame = CGRect(x: left, y: 0, width: max(0, right - 8 - left), height: h)
             icon.isHidden = false
             activity.isHidden = false
             let room = featured.frame.width
