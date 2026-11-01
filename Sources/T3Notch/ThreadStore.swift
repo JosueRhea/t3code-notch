@@ -169,6 +169,8 @@ final class ThreadStore: ObservableObject {
     private var nextRequestId = 1
     private var shellRequestId = ""
     private var environmentId: String?
+    /// T3's environment id (for deep links into T3 Code, here and on the phone).
+    var currentEnvironmentId: String? { environmentId }
     private var pingTimer: Timer?
     private var retryDelay: TimeInterval = 1
     private let auth = TokenStore()
@@ -217,6 +219,11 @@ final class ThreadStore: ObservableObject {
                           "threadId": thread.id, "messageId": UUID().uuidString.lowercased(),
                           "text": text, "attachments": [] as [Any],
                           "deliveryIntent": "auto", "dispatchMode": ["type": "start_immediately"]])
+    }
+
+    /// Bring a put-away "needs you" card back (the little island beside the notch).
+    func showEvent(_ t: T3Thread) {
+        show(t.id, for: t.status.needsYou ? nil : 7)
     }
 
     func dismissEvent() {
@@ -644,7 +651,7 @@ final class ThreadStore: ObservableObject {
             t.activity = t.lastMessage
             t.linesAdded = 812; t.linesRemoved = 431
             return ([t], "demo")
-        case "list":
+        case "list", "split":
             var a = make("d1", "Fix checkout flow regression", .working, started: -754)
             a.provider = "codex"; a.model = "GPT-5.3 Codex"
             a.activity = "$ pnpm test --filter checkout"; a.activityIcon = "terminal"
@@ -672,6 +679,12 @@ final class ThreadStore: ObservableObject {
             f.provider = "claudeAgent"
             f.activity = "Editing ThemeProvider.tsx"; f.activityIcon = "pencil"
             f.linesAdded = 37; f.linesRemoved = 12; f.toolCalls = 9
+            if mode == "split" { // something needs you while others work, its card put away
+                var g = make("d7", "Clean up old build artifacts", .pendingApproval)
+                g.provider = "claudeAgent"
+                g.activity = "rm -rf .build T3Notch.app"; g.activityIcon = "questionmark.bubble"
+                return ([g, f, a, b, c, d], nil)
+            }
             return ([f, a, b, c, d, e], nil)
         default:
             return ([], nil)

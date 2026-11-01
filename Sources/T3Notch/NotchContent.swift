@@ -14,8 +14,45 @@ class FlippedView: NSView {
 enum UI {
     static func font(_ size: CGFloat, _ weight: NSFont.Weight = .regular, mono: Bool = false, digits: Bool = false) -> NSFont {
         if mono { return .monospacedSystemFont(ofSize: size, weight: weight) }
-        if digits { return .monospacedDigitSystemFont(ofSize: size, weight: weight) }
+        if digits { return rounded(size, weight) }
         return .systemFont(ofSize: size, weight: weight)
+    }
+
+    /// SF Pro Rounded with fixed-width digits: every number in the notch (timers, diffs, counts)
+    /// is one family, and they don't jiggle as they change.
+    static func rounded(_ size: CGFloat, _ weight: NSFont.Weight = .semibold) -> NSFont {
+        let base = NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
+        return base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: size) } ?? base
+    }
+
+    /// Spring a view from `offset` (where it was drawn before) back to where it is now.
+    /// Additive, so it composes with whatever else the layer is doing.
+    static func fly(_ v: NSView, from offset: CGSize) {
+        v.wantsLayer = true // a just-mounted view may not have its layer yet
+        guard let l = v.layer, abs(offset.width) + abs(offset.height) > 0.5 else { return }
+        let s = NotchRootView.spring("transform.translation")
+        s.fromValue = NSValue(size: offset)
+        s.toValue = NSValue(size: .zero)
+        s.isAdditive = true
+        l.add(s, forKey: "fly")
+    }
+
+    /// Pressed buttons squish a little (around their center) and spring back.
+    static func press(_ v: NSView, _ down: Bool) {
+        guard let l = v.layer else { return }
+        let b = l.bounds
+        let scale: CGFloat = down ? 0.93 : 1
+        var t = CATransform3DMakeTranslation(b.midX, b.midY, 0)
+        t = CATransform3DScale(t, scale, scale, 1)
+        t = CATransform3DTranslate(t, -b.midX, -b.midY, 0)
+        let s = NotchRootView.spring("transform", damping: down ? 0.9 : 0.55)
+        s.fromValue = NSValue(caTransform3D: l.presentation()?.transform ?? l.transform)
+        s.toValue = NSValue(caTransform3D: t)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        l.transform = t
+        CATransaction.commit()
+        l.add(s, forKey: "press")
     }
 
     static func label(_ font: NSFont, _ color: NSColor = .white, lines: Int = 1) -> NSTextField {
@@ -107,7 +144,7 @@ final class PillButton: NSButton {
 
     var fittingWidth: CGFloat { ceil(attributedTitle.size().width) + (pillHeight < 24 ? 16 : 24) }
 
-    override func highlight(_ flag: Bool) { alphaValue = flag ? 0.7 : 1 }
+    override func highlight(_ flag: Bool) { UI.press(self, flag) }
 
     @objc private func fire() { onClick() }
 }
@@ -136,7 +173,7 @@ final class IconButton: NSButton {
     required init?(coder: NSCoder) { fatalError() }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func highlight(_ flag: Bool) { alphaValue = flag ? 0.6 : 1 }
+    override func highlight(_ flag: Bool) { UI.press(self, flag) }
     @objc private func fire() { onClick() }
 }
 
@@ -231,6 +268,17 @@ final class ExpandedView: FlippedView {
         needsLayout = true
     }
 
+    /// Where a thread's title sits, for flying the collapsed bar's title into (or out of) it.
+    func titleRect(of id: String, in view: NSView) -> CGRect? {
+        layoutSubtreeIfNeeded()
+        return rows[id]?.titleRect(in: view)
+    }
+
+    func flyTitle(of id: String, from rect: CGRect, in view: NSView) {
+        layoutSubtreeIfNeeded() // rows get their frames in layout(); measure where they really are
+        rows[id]?.flyTitle(from: rect, in: view)
+    }
+
     override func layout() {
         super.layout()
         let w = bounds.width
@@ -258,6 +306,65 @@ final class ExpandedView: FlippedView {
     }
 }
 
+// MARK: - Avatar
+
+/// The provider's logo as pixel art (PixelGlyph). Working: the opencode-style
+/// sweep runs over the logo; waiting: a soft band drifts down and up it; needs you: it breathes. Finished,
+/// failed and plan-ready keep the logo still with a small status dot in the corner.
+@MainActor
+final class AvatarView: NSView {
+    private let glyph = PixelGlyph()
+    private let badge = CALayer()
+    private var shown: (String?, ThreadStatus)?
+
+    static let size: CGFloat = 28
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        addSubview(glyph)
+        badge.borderWidth = 1.5
+        badge.borderColor = (Theme.current.background ?? .black).cgColor // cuts it out of the logo
+        layer?.addSublayer(badge)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        let b = bounds
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        badge.frame = CGRect(x: b.maxX - 9, y: b.maxY - 9, width: 10, height: 10)
+        badge.cornerRadius = 5
+        CATransaction.commit()
+        glyph.frame = b.insetBy(dx: 4, dy: 4)
+    }
+
+    func configure(provider: String?, status: ThreadStatus) {
+        if let s = shown, s.0 == provider, s.1 == status { return }
+        shown = (provider, status)
+        let motion: PixelGlyph.Motion = switch status {
+        case .working: .sweep(slow: false)
+        case .connecting: .sweep(slow: true)
+        case .waiting: .wave
+        case .pendingApproval, .awaitingInput, .guestRequest: .breathe
+        case .idle: .still(0.6)
+        default: .still(1)
+        }
+        glyph.configure(provider: provider, motion: motion)
+        let dot: NSColor? = switch status {
+        case .pendingApproval, .awaitingInput, .guestRequest, .failed, .completed, .planReady: status.color
+        default: nil
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        badge.isHidden = dot == nil
+        badge.backgroundColor = dot?.cgColor
+        CATransaction.commit()
+    }
+}
+
 // MARK: - Thread row
 
 @MainActor
@@ -267,7 +374,7 @@ final class ThreadRowView: FlippedView {
     private(set) var thread: T3Thread?
 
     private let title = UI.label(UI.font(13, .semibold))
-    private let glyph = StatusIndicator()
+    private let avatar = AvatarView()
     private let time = UI.label(UI.font(11, .medium, digits: true), NSColor.white.withAlphaComponent(0.55))
     private let meta = UI.label(UI.font(11), NSColor.white.withAlphaComponent(0.5))
     private let diff = UI.label(UI.font(11, .semibold, digits: true))
@@ -296,7 +403,7 @@ final class ThreadRowView: FlippedView {
         terminal.layer?.cornerRadius = 8
         terminal.layer?.backgroundColor = Theme.current.fill(0.06).cgColor
         terminal.addSubview(terminalText)
-        [title, replyButton, glyph, stop, time, meta, diff, tools, activity, terminal, actions].forEach(addSubview)
+        [avatar, title, replyButton, stop, time, meta, diff, tools, activity, terminal, actions].forEach(addSubview)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -306,19 +413,31 @@ final class ThreadRowView: FlippedView {
         if let t = thread { store.open(t) }
     }
 
+    private var lit: Bool?
+
     func configure(_ t: T3Thread, selected: Bool) {
         let previous = thread
         thread = t
         let hover = model.hoveredRow == t.id
 
-        layer?.backgroundColor = selected || hover ? Theme.current.fill(selected ? 0.14 : 0.1).cgColor : nil
-        layer?.borderWidth = selected ? 1 : 0
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        // Hover / selection: the card fades up (instead of snapping) with a hairline on top.
+        let on = selected || hover
+        let background = on ? Theme.current.fill(selected ? 0.14 : 0.09).cgColor : NSColor.clear.cgColor
+        if lit != on, lit != nil, let l = layer {
+            let fade = CABasicAnimation(keyPath: "backgroundColor")
+            fade.fromValue = l.presentation()?.backgroundColor ?? l.backgroundColor
+            fade.toValue = background
+            fade.duration = on ? 0.12 : 0.25
+            l.add(fade, forKey: "lit")
+        }
+        lit = on
+        layer?.backgroundColor = background
+        layer?.borderWidth = on ? 1 : 0
+        layer?.borderColor = NSColor.white.withAlphaComponent(selected ? 0.18 : 0.07).cgColor
 
         title.stringValue = t.title
         title.textColor = NSColor.white.withAlphaComponent(t.status == .idle ? 0.7 : 1)
-        glyph.isHidden = t.status == .idle
-        glyph.show(t.status, small: true)
+        avatar.configure(provider: t.provider, status: t.status)
         replyButton.isHidden = !(hover && model.replyingTo != t.id)
         let busyStop = t.status.isBusy && (hover || store.sending.contains(t.id))
         stop.isHidden = !busyStop
@@ -347,6 +466,13 @@ final class ThreadRowView: FlippedView {
         if t.request != nil { actions.configure(t) }
         tick()
         needsLayout = true
+    }
+
+    func titleRect(in view: NSView) -> CGRect { title.convert(title.bounds, to: view) }
+
+    func flyTitle(from rect: CGRect, in view: NSView) {
+        let now = titleRect(in: view)
+        UI.fly(title, from: CGSize(width: rect.minX - now.minX, height: rect.minY - now.minY))
     }
 
     /// Once a second: relative time / run clock / usage-limit countdown.
@@ -404,10 +530,9 @@ final class ThreadRowView: FlippedView {
             out.append(UI.symbol("arrow.triangle.branch", 9, bright, .semibold))
             out.append(UI.text(" " + b, UI.font(11, .medium), bright))
         }
-        if Settings.showModel, let m = t.model {
+        if Settings.showModel, let m = t.model { // the provider's logo is the avatar
             if out.length > 0 { out.append(UI.text("   ", f, c)) }
-            out.append(Logos.attachment(for: t.provider, height: 11) ?? UI.symbol("cpu", 9, c, .regular))
-            out.append(UI.text(" " + m, f, c))
+            out.append(UI.text(m, f, c))
         }
         if let pr = t.pr {
             if out.length > 0 { out.append(UI.text("   ", f, c)) }
@@ -436,6 +561,10 @@ final class ThreadRowView: FlippedView {
         let w = bounds.width, pad: CGFloat = 10
         var right = w - pad
         let lineY: (NSTextField, CGFloat) -> CGFloat = { l, h in ((h - UI.height(l)) / 2).rounded() }
+        // Avatar beside the first two lines; everything else lines up after it.
+        let a = AvatarView.size
+        avatar.frame = CGRect(x: pad, y: 8 + ((Self.titleHeight + 3 + UI.height(meta)) - a) / 2, width: a, height: a)
+        let left = pad + a + 10
 
         // Line 1: title ............ [reply] [glyph] [time | stop]
         if !stop.isHidden {
@@ -445,14 +574,13 @@ final class ThreadRowView: FlippedView {
             let tw = UI.width(time)
             right -= tw; time.frame = CGRect(x: right, y: 8 + lineY(time, Self.titleHeight), width: tw, height: UI.height(time))
         }
-        if !glyph.isHidden { right -= 6 + 18; glyph.frame = CGRect(x: right, y: 8, width: 18, height: Self.titleHeight) }
         if !replyButton.isHidden { right -= 6 + 24; replyButton.frame = CGRect(x: right, y: 8, width: 24, height: Self.titleHeight) }
-        title.frame = CGRect(x: pad, y: 8 + lineY(title, Self.titleHeight), width: max(0, right - 8 - pad), height: UI.height(title))
+        title.frame = CGRect(x: left, y: 8 + lineY(title, Self.titleHeight), width: max(0, right - 8 - left), height: UI.height(title))
 
         // Line 2: meta, then +N −M and tool counts.
-        var x = pad
+        var x = left
         let y2: CGFloat = 8 + Self.titleHeight + 3
-        let mw = min(UI.width(meta), w - pad * 2 - 120)
+        let mw = min(UI.width(meta), w - left - pad - 120)
         meta.frame = CGRect(x: x, y: y2, width: mw, height: UI.height(meta)); x += mw + 6
         if !diff.isHidden { let dw = UI.width(diff); diff.frame = CGRect(x: x, y: y2, width: dw, height: UI.height(diff)); x += dw + 6 }
         tools.frame = CGRect(x: x, y: y2, width: max(0, min(UI.width(tools), w - pad - x)), height: UI.height(tools))
@@ -461,16 +589,16 @@ final class ThreadRowView: FlippedView {
         var y = y2 + UI.height(meta) + 3
         activity.isHidden = activity.attributedStringValue.length == 0
         if !activity.isHidden {
-            activity.frame = CGRect(x: pad, y: y, width: w - pad * 2, height: UI.height(activity))
+            activity.frame = CGRect(x: left, y: y, width: w - left - pad, height: UI.height(activity))
             y += UI.height(activity) + 6
         }
         if !terminal.isHidden {
-            terminal.frame = CGRect(x: pad, y: y, width: w - pad * 2, height: NotchModel.outputHeight - 8)
+            terminal.frame = CGRect(x: left, y: y, width: w - left - pad, height: NotchModel.outputHeight - 8)
             terminalText.frame = terminal.bounds.insetBy(dx: 8, dy: 5)
             y += NotchModel.outputHeight
         }
         if !actions.isHidden, t.request != nil {
-            actions.frame = CGRect(x: pad, y: y, width: w - pad * 2, height: NotchModel.actionBarHeight - 6)
+            actions.frame = CGRect(x: left, y: y, width: w - left - pad, height: NotchModel.actionBarHeight - 6)
         }
     }
 }
@@ -685,6 +813,7 @@ final class FinishedView: FlippedView {
     private let store: ThreadStore
     private var thread: T3Thread?
     private let glyph = StatusIndicator()
+    private let badge = CheckBadge()
     private let title = UI.label(UI.font(13, .semibold))
     private let status = UI.label(UI.font(11, .medium))
     private let message = UI.label(UI.font(12), NSColor.white.withAlphaComponent(0.7), lines: 3)
@@ -693,7 +822,7 @@ final class FinishedView: FlippedView {
         self.model = model
         self.store = store
         super.init(frame: .zero)
-        [glyph, title, status, message].forEach(addSubview)
+        [glyph, badge, title, status, message].forEach(addSubview)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -704,7 +833,11 @@ final class FinishedView: FlippedView {
 
     func configure(_ t: T3Thread) {
         thread = t
-        glyph.show(t.status == .idle ? .completed : t.status, small: false)
+        let shown: ThreadStatus = t.status == .idle ? .completed : t.status
+        let drawn = shown == .completed || shown == .failed
+        glyph.isHidden = drawn
+        badge.isHidden = !drawn
+        if drawn { badge.draw(failed: shown == .failed) } else { glyph.show(shown, small: false) }
         title.stringValue = t.title
         status.stringValue = t.status == .idle ? "Done" : t.status.label
         status.textColor = t.status == .idle ? NSColor.white.withAlphaComponent(0.5) : t.status.color
@@ -719,10 +852,81 @@ final class FinishedView: FlippedView {
         let m = Layout.finished(t, width: w, top: model.notchSize.height, inset: pad)
         let y = model.notchSize.height + 10
         glyph.frame = CGRect(x: pad - 2, y: y + 1, width: 18, height: 18)
+        badge.frame = CGRect(x: pad - 1, y: y + 1, width: 18, height: 18)
         let sw = UI.width(status)
         status.frame = CGRect(x: w - pad - sw, y: y + 2, width: sw, height: UI.height(status))
         title.frame = CGRect(x: pad + 26, y: y, width: max(0, status.frame.minX - 8 - pad - 26), height: UI.height(title))
         message.frame = CGRect(x: pad + 26, y: y + 24, width: w - pad * 2 - 28, height: m.message)
+    }
+}
+
+/// A circle that draws itself, then a check (or a cross) inside it: the finish moment.
+@MainActor
+final class CheckBadge: NSView {
+    private let circle = CAShapeLayer()
+    private let mark = CAShapeLayer()
+    private var drawnFailed: Bool?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        for l in [circle, mark] {
+            l.fillColor = nil
+            l.lineWidth = 1.8
+            l.lineCap = .round
+            l.lineJoin = .round
+            layer?.addSublayer(l)
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
+
+    func draw(failed: Bool) {
+        guard drawnFailed != failed else { return }
+        drawnFailed = failed
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+        let color = (failed ? ThreadStatus.failed : ThreadStatus.completed).color.cgColor
+        let now = CACurrentMediaTime()
+        for (l, delay, duration) in [(circle, 0.1, 0.38), (mark, 0.38, 0.26)] {
+            l.strokeColor = color
+            let a = CABasicAnimation(keyPath: "strokeEnd")
+            a.fromValue = 0
+            a.toValue = 1
+            a.beginTime = now + delay
+            a.duration = duration
+            a.fillMode = .backwards
+            a.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0, 0.2, 1)
+            l.add(a, forKey: "draw")
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        let b = bounds.insetBy(dx: 1.5, dy: 1.5)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        circle.frame = bounds
+        mark.frame = bounds
+        // Start at the top and go clockwise, like a ring filling up.
+        let ring = CGMutablePath()
+        ring.addArc(center: CGPoint(x: b.midX, y: b.midY), radius: b.width / 2,
+                    startAngle: -.pi / 2, endAngle: 1.5 * .pi, clockwise: false)
+        circle.path = ring
+        let m = CGMutablePath()
+        let (x, y, s) = (b.minX, b.minY, b.width)
+        if drawnFailed == true {
+            m.move(to: CGPoint(x: x + s * 0.34, y: y + s * 0.34)); m.addLine(to: CGPoint(x: x + s * 0.66, y: y + s * 0.66))
+            m.move(to: CGPoint(x: x + s * 0.66, y: y + s * 0.34)); m.addLine(to: CGPoint(x: x + s * 0.34, y: y + s * 0.66))
+        } else {
+            m.move(to: CGPoint(x: x + s * 0.28, y: y + s * 0.52))
+            m.addLine(to: CGPoint(x: x + s * 0.44, y: y + s * 0.67))
+            m.addLine(to: CGPoint(x: x + s * 0.72, y: y + s * 0.36))
+        }
+        mark.path = m
+        CATransaction.commit()
     }
 }
 

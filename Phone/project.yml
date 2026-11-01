@@ -1,0 +1,64 @@
+# The iPhone side of T3 Notch: a small UIKit app (pairing) and the Live Activity (WidgetKit, which
+# Apple requires to be SwiftUI). Generate the Xcode project with `xcodegen` (see ../README.md).
+name: T3NotchPhone
+options:
+  deploymentTarget:
+    iOS: "18.0"   # broadcast channels for Live Activities
+settings:
+  base:
+    DEVELOPMENT_TEAM: ${T3NOTCH_TEAM_ID}   # your Apple Developer team id: T3NOTCH_TEAM_ID=XXXXXXXXXX xcodegen
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  T3NotchPhone:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      - Shared
+      - path: ../Sources/T3Notch/Shared
+        group: SharedWithMac
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: T3 Notch
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIUserInterfaceStyle: Dark
+        NSSupportsLiveActivities: true
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        NSLocalNetworkUsageDescription: Pairs with T3 Notch on your Mac, once, over your home network.
+        NSBonjourServices: [_t3notch._tcp]
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.custom-dock.t3notch.phone
+            CFBundleURLSchemes: [t3notch]
+    entitlements:
+      path: App/T3NotchPhone.entitlements
+      properties:
+        aps-environment: development
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.custom-dock.t3notch.phone
+        TARGETED_DEVICE_FAMILY: "1"
+    dependencies:
+      - target: T3NotchLive
+  T3NotchLive:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Live
+      - Shared
+      - path: ../Sources/T3Notch/Shared
+        group: SharedWithMac
+    info:
+      path: Live/Info.plist
+      properties:
+        CFBundleDisplayName: T3 Notch
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.custom-dock.t3notch.phone.live
+        TARGETED_DEVICE_FAMILY: "1"

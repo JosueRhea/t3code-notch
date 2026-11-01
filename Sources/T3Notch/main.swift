@@ -27,7 +27,8 @@ final class NotchController {
     private let store: ThreadStore
 
     /// Window is sized for the largest state; the visible notch is drawn inside it.
-    private static let canvas = CGSize(width: 600, height: 560)
+    /// Wide enough for the split island beside the widest collapsed bar.
+    private static let canvas = CGSize(width: 700, height: 560)
 
     /// While the settings menu is open the cursor leaves the notch; don't collapse under it.
     var holdOpen = false
@@ -228,7 +229,10 @@ final class NotchController {
         let row = inside ? model.rowId(atY: rect.maxY - p.y) : nil
         if model.hoveredRow != row { model.hoveredRow = row }
         if model.focused { return } // keyboard / reply mode: stays open until Esc or click-away
-        panel.ignoresMouseEvents = !inside
+        // The split island takes clicks, but hovering it doesn't open the list.
+        let onBubble = model.splitNeedsYou && CGRect(x: rect.maxX + NotchModel.bubbleGap, y: rect.maxY - model.notchSize.height,
+                                                     width: NotchModel.bubbleWidth, height: model.notchSize.height).contains(p)
+        panel.ignoresMouseEvents = !(inside || onBubble)
 
         if inside {
             collapseWork?.cancel()
@@ -296,6 +300,7 @@ extension NSScreen {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let store = ThreadStore()
+    private lazy var live = LiveActivityMirror(store: store)
     private var controllers: [NotchController] = []
     private var monitors: [Any] = []
     private var statusItem: NSStatusItem!
@@ -308,6 +313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
+        _ = live // starts mirroring to the iPhone Live Activity, once set up
         Theme.start() // before the first panels, so they open already matching T3
         rebuildPanels()
         NotificationCenter.default.addObserver(forName: Theme.didChange, object: nil, queue: .main) { [weak self] _ in
@@ -439,6 +445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(capture)
 
         menu.addItem(themeMenu())
+        menu.addItem(liveMenu())
 
         let showModel = NSMenuItem(title: "Show Model", action: #selector(toggleShowModel), keyEquivalent: "")
         showModel.target = self
@@ -484,6 +491,81 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let item = NSMenuItem(title: "Theme", action: nil, keyEquivalent: "")
         item.submenu = sub
         return item
+    }
+
+    /// iPhone Live Activity: push key, pairing, status.
+    private func liveMenu() -> NSMenuItem {
+        let sub = NSMenu()
+        let setup = live.setup
+        func info(_ text: String) {
+            let item = NSMenuItem(title: text, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            sub.addItem(item)
+        }
+        info(setup.hasKey ? "Push key: \(setup.keyId ?? "")" : "Push key: not set")
+        info(setup.paired ? "Paired with \(setup.deviceName ?? "iPhone")" : "Not paired")
+        if let result = live.lastResult { info("Last: \(result)") }
+        sub.addItem(.separator())
+        sub.addItem(NSMenuItem(title: setup.hasKey ? "Replace Push Key…" : "Set Push Key (AuthKey .p8)…",
+                               action: #selector(setPushKey), keyEquivalent: ""))
+        sub.addItem(NSMenuItem(title: setup.paired ? "Pair Again…" : "Pair iPhone…", action: #selector(pairPhone), keyEquivalent: ""))
+        if setup.paired {
+            sub.addItem(NSMenuItem(title: "Restart Live Activity", action: #selector(restartLive), keyEquivalent: ""))
+            sub.addItem(NSMenuItem(title: "Unpair", action: #selector(unpairPhone), keyEquivalent: ""))
+        }
+        sub.items.forEach { if $0.action != nil { $0.target = self } }
+        let item = NSMenuItem(title: "iPhone Live Activity", action: nil, keyEquivalent: "")
+        item.submenu = sub
+        return item
+    }
+
+    @objc private func setPushKey() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose your APNs auth key"
+        panel.message = "The AuthKey_<KEY ID>.p8 file from Certificates, IDs & Profiles → Keys. It's copied to T3 Notch's private folder."
+        panel.allowedContentTypes = [.init(filenameExtension: "p8") ?? .data]
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
+        NSApp.activate()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        // The team id isn't in the key file; it's on developer.apple.com → Membership (10 characters).
+        let ask = NSAlert()
+        ask.messageText = "Your Apple Developer Team ID"
+        ask.informativeText = "The team that owns this key and signs the iPhone app (developer.apple.com → Membership details)."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+        field.stringValue = live.setup.teamId
+        field.placeholderString = "XXXXXXXXXX"
+        ask.accessoryView = field
+        ask.addButton(withTitle: "Save")
+        ask.addButton(withTitle: "Cancel")
+        guard ask.runModal() == .alertFirstButtonReturn else { return }
+        let team = field.stringValue.trimmingCharacters(in: .whitespaces).uppercased()
+        guard team.count == 10, team.allSatisfy({ $0.isLetter || $0.isNumber }) else {
+            alert("That doesn't look like a Team ID", "It's 10 letters and digits, like A1B2C3D4E5."); return
+        }
+        do { try live.installKey(from: url, teamId: team) } catch { alert("That key didn't work", error.localizedDescription) }
+    }
+
+    private var pairingWindow: PairingWindow?
+
+    /// A floating window with the code, not a modal alert: a modal run loop would freeze the
+    /// notch (it couldn't collapse) for as long as the code is up.
+    @objc private func pairPhone() {
+        pairingWindow?.close()
+        let window = PairingWindow { [weak self] request in self?.live.paired(request) }
+        do { try window.start() } catch { alert("Couldn't start pairing", error.localizedDescription); return }
+        window.onClose = { [weak self] in self?.pairingWindow = nil }
+        pairingWindow = window
+    }
+
+    @objc private func unpairPhone() { live.unpair() }
+    @objc private func restartLive() { live.restart() }
+
+    private func alert(_ title: String, _ text: String) {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = text
+        NSApp.activate()
+        a.runModal()
     }
 
     @objc private func pickTheme(_ sender: NSMenuItem) {

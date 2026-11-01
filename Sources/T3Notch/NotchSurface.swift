@@ -4,8 +4,8 @@ import AppKit
 ///
 /// SwiftUI re-laid out its whole view tree for every animation frame and every state change,
 /// which was ~95% of the app's CPU while threads were working. Here the notch shape is a
-/// CAShapeLayer and every label is a plain NSTextField: springs, slides and rolling digits are
-/// CAAnimations that run in the window server, so the app does no work per frame.
+/// CAShapeLayer and every label is a plain NSTextField: springs, slides, glows and rolling
+/// digits are CAAnimations that run in the window server, so the app does no work per frame.
 ///
 /// The expanded list and cards (NotchContent.swift) only exist while open.
 @MainActor
@@ -18,17 +18,40 @@ final class NotchRootView: NSView {
     /// (a short fade read as a black band stuck on top).
     private let backdrop = CAGradientLayer()
     private let backdropMask = CAShapeLayer()
+    /// Soft light under the edge in the lead status color: breathing while agents work,
+    /// pulsing when one needs you, a flash of green (or red) when a run ends.
+    private let aura = CAShapeLayer()
+    /// Depth over the black, clipped to the shape: a faint top-to-bottom sheen, a 1pt inner rim
+    /// that fades in below the screen edge, and a light sweeping along the bottom while agents work.
+    private let chrome = CALayer()
+    private let chromeMask = CAShapeLayer()
+    private let sheen = CAGradientLayer()
+    private let rim = CAShapeLayer()
+    private let rimFade = CAGradientLayer()
+    private let sweepTrack = CALayer()
+    private let sweep = CAGradientLayer()
     private let compact: CompactBar
+    /// Clips the collapsed bar to the springing shape, so its text never shows past the edge
+    /// while the bar grows or shrinks.
+    private let compactMask = CAShapeLayer()
+    private let bubble = SplitBubble()
+    /// When the shape last started a spring: the island waits for it to settle.
+    private var shapeMovedAt: CFTimeInterval = 0
     private var content: NSView?
     private var contentKey = ""
     private var applied: (mode: NotchMode, size: CGSize)?
+    private var auraKey = ""
+    private var sweeping = false
+    /// Closing the list: the row title the collapsed bar's title flies back from.
+    private var flyBack: (id: String, rect: CGRect)?
 
     /// Response 0.42s, damping fraction 0.78: settles fast with a small overshoot.
-    nonisolated static func spring(_ keyPath: String) -> CASpringAnimation {
+    /// A finished card opens bouncier (0.6): a little squash-and-settle.
+    nonisolated static func spring(_ keyPath: String, damping: CGFloat = 0.78) -> CASpringAnimation {
         let a = CASpringAnimation(keyPath: keyPath)
         a.mass = 1
-        a.stiffness = pow(2 * .pi / 0.42, 2)      // response 0.42s
-        a.damping = 2 * 0.78 * (2 * .pi / 0.42)   // damping fraction 0.78
+        a.stiffness = pow(2 * .pi / 0.42, 2)          // response 0.42s
+        a.damping = 2 * damping * (2 * .pi / 0.42)    // damping fraction
         a.duration = a.settlingDuration
         return a
     }
@@ -40,6 +63,13 @@ final class NotchRootView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = false
+
+        aura.fillColor = NSColor.black.cgColor
+        aura.shadowOpacity = 0
+        aura.shadowRadius = 9
+        aura.shadowOffset = CGSize(width: 0, height: 2)
+        layer?.addSublayer(aura)
+
         shape.fillColor = NSColor.black.cgColor
         shape.shadowColor = Theme.current.glowColor
         shape.shadowOpacity = 0
@@ -51,7 +81,27 @@ final class NotchRootView: NSView {
             backdrop.mask = backdropMask
             layer?.addSublayer(backdrop)
         }
+
+        chrome.mask = chromeMask
+        sheen.colors = [NSColor.white.withAlphaComponent(0).cgColor, NSColor.white.withAlphaComponent(0.055).cgColor]
+        rim.fillColor = nil
+        rim.lineWidth = 2 // half of it is outside the shape and clipped: a 1pt inner hairline
+        rim.strokeColor = (Theme.current.surface == nil ? NSColor.white.withAlphaComponent(0.12)
+                                                       : Theme.current.accent.withAlphaComponent(0.25)).cgColor
+        rimFade.colors = [NSColor.clear.cgColor, NSColor.clear.cgColor, NSColor.white.cgColor, NSColor.white.cgColor]
+        rim.mask = rimFade
+        sweepTrack.masksToBounds = true
+        sweep.startPoint = CGPoint(x: 0, y: 0.5)
+        sweep.endPoint = CGPoint(x: 1, y: 0.5)
+        sweep.frame = CGRect(x: -Self.sweepWidth, y: 0, width: Self.sweepWidth, height: Self.sweepHeight)
+        sweepTrack.addSublayer(sweep)
+        [sheen, rim, sweepTrack].forEach(chrome.addSublayer)
+        layer?.addSublayer(chrome)
+
         addSubview(compact)
+        compact.wantsLayer = true
+        compact.layer?.mask = compactMask
+        addSubview(bubble)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -59,13 +109,22 @@ final class NotchRootView: NSView {
     override var isFlipped: Bool { true } // top-left origin
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// The split island is a button: it brings the "needs you" card back.
+    override func mouseDown(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if !bubble.isHidden, bubble.frame.contains(p), let t = store.needsYou.first { store.showEvent(t) }
+    }
+
     override func layout() {
         super.layout()
         applied = nil // canvas changed: re-place everything without animating
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        backdrop.frame = bounds
+        for l in [backdrop, backdropMask, chrome, chromeMask, sheen, rim, rimFade] { l.frame = bounds }
         backdropMask.frame = backdrop.bounds
+        // The rim is invisible where the shape meets the screen edge, and fades in toward its sides.
+        let h = max(bounds.height, 1), nh = model.notchSize.height
+        rimFade.locations = [0, NSNumber(value: Double(nh * 0.3 / h)), NSNumber(value: Double((nh - 6) / h)), 1]
         CATransaction.commit()
         fadeBackdrop(to: model.size)
         refresh(animated: false)
@@ -80,13 +139,22 @@ final class NotchRootView: NSView {
         if applied?.mode != mode || applied?.size != size {
             let animate = animated && applied != nil
             if animate { shapeFrom = shape.presentation()?.path ?? shape.path }
-            setShape(size: size, animated: animate)
+            let finishing = mode == .peek && applied?.mode != .peek && store.event?.status.needsYou == false
+            setShape(size: size, animated: animate, damping: finishing ? 0.6 : 0.78)
+            if animate { shapeMovedAt = CACurrentMediaTime() }
             applied = (mode, size)
         }
         syncContent(mode: mode, size: size, shapeFrom: shapeFrom)
         compact.frame = CGRect(x: (bounds.width - size.width) / 2, y: 0, width: size.width, height: model.notchSize.height)
         compact.setVisible(mode == .activity)
-        if mode == .activity { compact.update() }
+        if mode == .activity {
+            compact.update()
+            if let back = flyBack, compact.featuredId == back.id { compact.flyTitle(from: back.rect, in: self) }
+        }
+        flyBack = nil
+        syncBubble(mode: mode, size: size)
+        syncAura(mode: mode)
+        syncSweep(mode: mode)
     }
 
     // MARK: Shape
@@ -121,20 +189,38 @@ final class NotchRootView: NSView {
         CATransaction.commit()
     }
 
-    private func setShape(size: CGSize, animated: Bool) {
+    private func sheenLocations(_ size: CGSize) -> [NSNumber] {
+        [0, NSNumber(value: Double(max(size.height, 1) / max(bounds.height, 1)))]
+    }
+
+    private func setShape(size: CGSize, animated: Bool, damping: CGFloat) {
         fadeBackdrop(to: size)
         let newPath = path(for: size)
         let expanded = model.mode == .expanded
         if animated {
             let from = shape.presentation()?.path ?? shape.path
-            let spring = Self.spring("path")
-            spring.fromValue = from
-            spring.toValue = newPath
-            shape.add(spring, forKey: "path")
-            backdropMask.add(spring, forKey: "path")
+            // Everything shaped like the notch springs together, so nothing peeks out mid-flight.
+            let shaped: [(CALayer, String)] = [(shape, "path"), (backdropMask, "path"), (chromeMask, "path"),
+                                               (rim, "path"), (aura, "path"), (aura, "shadowPath")]
+            for (l, key) in shaped {
+                let spring = Self.spring(key, damping: damping)
+                spring.fromValue = from
+                spring.toValue = newPath
+                l.add(spring, forKey: key)
+            }
+            // Same spring for the bar's clip, in the bar's coordinates (it sits at the new size).
+            var shift = CGAffineTransform(translationX: -(bounds.width - size.width) / 2, y: 0)
+            let clip = Self.spring("path", damping: damping)
+            clip.fromValue = (from ?? newPath).copy(using: &shift)
+            clip.toValue = newPath.copy(using: &shift)
+            compactMask.add(clip, forKey: "path")
+            let sheenSpring = Self.spring("locations", damping: damping)
+            sheenSpring.fromValue = sheen.presentation()?.locations ?? sheen.locations
+            sheenSpring.toValue = sheenLocations(size)
+            sheen.add(sheenSpring, forKey: "locations")
             // The shadow's outline springs with the shape (otherwise it pops to the final size
             // before the notch has opened), and it only fades in once the shape is mostly grown.
-            let shadowShape = Self.spring("shadowPath")
+            let shadowShape = Self.spring("shadowPath", damping: damping)
             shadowShape.fromValue = shape.presentation()?.shadowPath ?? from
             shadowShape.toValue = newPath
             shape.add(shadowShape, forKey: "shadowPath")
@@ -150,12 +236,130 @@ final class NotchRootView: NSView {
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        shape.path = newPath
-        backdropMask.path = newPath
+        for l in [shape, backdropMask, chromeMask, rim, aura] { l.path = newPath }
+        var shift = CGAffineTransform(translationX: -(bounds.width - size.width) / 2, y: 0)
+        compactMask.path = newPath.copy(using: &shift)
+        compactMask.frame = CGRect(origin: .zero, size: size)
         shape.shadowPath = newPath
+        aura.shadowPath = newPath
+        sheen.locations = sheenLocations(size)
         // A shadow is a blur pass; only pay for it while it shows.
         shape.shadowOpacity = expanded ? Theme.current.glowOpacity : 0
+        sweepTrack.frame = CGRect(x: (bounds.width - size.width) / 2, y: size.height - Self.sweepHeight,
+                                  width: size.width, height: Self.sweepHeight)
         CATransaction.commit()
+    }
+
+    // MARK: Light: aura, sweep, finish flash, nudge
+
+    private func syncAura(mode: NotchMode) {
+        var status: ThreadStatus?
+        switch mode {
+        case .activity: status = model.leadStatus
+        case .peek: status = store.stickyEvent?.status
+        default: break
+        }
+        // Needs you: a quicker, brighter pulse. Working: a slow breath. Anything else: dark.
+        let style: (period: Double, low: Float, high: Float)? = switch status {
+        case .pendingApproval?, .awaitingInput?, .guestRequest?: (0.8, 0.35, 0.95)
+        case .working?, .connecting?: (1.8, 0.12, 0.5)
+        default: nil
+        }
+        let key = style.map { "\(status!)-\($0.period)" } ?? "off"
+        guard key != auraKey else { return }
+        auraKey = key
+        aura.removeAnimation(forKey: "breathe")
+        guard let style, let status else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        aura.shadowColor = status.color.cgColor
+        CATransaction.commit()
+        let breathe = CABasicAnimation(keyPath: "shadowOpacity")
+        breathe.fromValue = style.low
+        breathe.toValue = style.high
+        breathe.duration = style.period
+        breathe.autoreverses = true
+        breathe.repeatCount = .infinity
+        breathe.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        aura.add(breathe, forKey: "breathe")
+    }
+
+    private static let sweepWidth: CGFloat = 150
+    private static let sweepHeight: CGFloat = 1.5
+
+    private func syncSweep(mode: NotchMode) {
+        let on = mode == .activity && model.compactThreads.contains { $0.status == .working }
+        guard on != sweeping else { return }
+        sweeping = on
+        if on { runSweep(ThreadStatus.working.color, repeating: true) } else { sweep.removeAnimation(forKey: "sweep") }
+    }
+
+    /// A short light gliding left to right along the bottom edge: an endless progress bar.
+    private func runSweep(_ color: NSColor, repeating: Bool, delay: Double = 0) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        sweep.colors = [color.withAlphaComponent(0), color.withAlphaComponent(0.95), color.withAlphaComponent(0)].map(\.cgColor)
+        CATransaction.commit()
+        let move = CABasicAnimation(keyPath: "position.x")
+        move.fromValue = -Self.sweepWidth / 2
+        move.toValue = sweepTrack.bounds.width + Self.sweepWidth / 2
+        move.duration = repeating ? 1.7 : 0.9
+        move.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        if repeating {
+            let cycle = CAAnimationGroup()
+            cycle.animations = [move]
+            cycle.duration = 3.2 // glide, then rest
+            cycle.repeatCount = .infinity
+            sweep.add(cycle, forKey: "sweep")
+        } else {
+            move.beginTime = CACurrentMediaTime() + delay
+            sweep.add(move, forKey: "sweepOnce")
+        }
+    }
+
+    /// A run finished: green (or red) light flares under the edge and runs along the bottom,
+    /// with the checkmark drawing itself in the card and the shape's bouncier spring.
+    private func celebrate(_ t: T3Thread) {
+        let color = (t.status == .failed ? ThreadStatus.failed : ThreadStatus.completed).color
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        aura.shadowColor = color.cgColor
+        CATransaction.commit()
+        let flash = CAKeyframeAnimation(keyPath: "shadowOpacity")
+        flash.values = [0, 0.95, 0.45, 0]
+        flash.keyTimes = [0, 0.15, 0.5, 1]
+        flash.duration = 1.8
+        flash.beginTime = CACurrentMediaTime() + 0.1
+        flash.fillMode = .backwards
+        aura.add(flash, forKey: "flash")
+        runSweep(color, repeating: false, delay: 0.3)
+    }
+
+    /// Something needs you: a small side-to-side wiggle once the card has opened, the way
+    /// iOS shakes a wrong passcode, only gentler.
+    private func nudge() {
+        let wiggle = CAKeyframeAnimation(keyPath: "transform.translation.x")
+        wiggle.values = [0, 7, -6, 4, -2, 0]
+        wiggle.keyTimes = [0, 0.15, 0.35, 0.55, 0.78, 1]
+        wiggle.duration = 0.5
+        wiggle.beginTime = CACurrentMediaTime() + 0.35
+        wiggle.isAdditive = true
+        wiggle.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer?.add(wiggle, forKey: "nudge")
+    }
+
+    // MARK: Split island
+
+    private func syncBubble(mode: NotchMode, size: CGSize) {
+        let show = model.splitNeedsYou
+        if show, let lead = store.needsYou.first?.status {
+            let w = NotchModel.bubbleWidth, h = model.notchSize.height
+            bubble.frame = CGRect(x: (bounds.width + size.width) / 2 + NotchModel.bubbleGap, y: 0, width: w, height: h)
+            bubble.configure(count: store.needsYou.count, status: lead)
+        }
+        // Split off once the bar has settled, not while it's still growing toward it.
+        let settle = max(0, shapeMovedAt + 0.38 - CACurrentMediaTime())
+        bubble.setVisible(show, travel: NotchModel.bubbleGap + 2, delay: settle) // buds off the notch's edge
     }
 
     // MARK: Expanded list / cards, only while open
@@ -167,10 +371,17 @@ final class NotchRootView: NSView {
         case .peek: event.map { "peek:\($0.id):\($0.status.needsYou)" } ?? ""
         default: ""
         }
+        // Opening from the collapsed bar: its title flies into its row.
+        var flyFrom: (id: String, rect: CGRect)?
         if key != contentKey {
             contentKey = key
+            if mode == .expanded, let id = compact.featuredId { flyFrom = (id, compact.titleRect(in: self)) }
             if let old = content {
                 content = nil
+                if mode == .activity, let list = old as? ExpandedView, let id = compact.lastFeaturedId,
+                   let rect = list.titleRect(of: id, in: self) {
+                    flyBack = (id, rect)
+                }
                 NSAnimationContext.runAnimationGroup({ $0.duration = 0.12; old.animator().alphaValue = 0 },
                                                      completionHandler: { old.removeFromSuperview() })
             }
@@ -186,6 +397,9 @@ final class NotchRootView: NSView {
                 addSubview(view)
                 content = view
                 NSAnimationContext.runAnimationGroup { $0.duration = 0.18; view.animator().alphaValue = 1 }
+                if mode == .peek, let event {
+                    if event.status.needsYou { nudge() } else { celebrate(event) }
+                }
             }
         }
         guard let content else { return }
@@ -211,7 +425,9 @@ final class NotchRootView: NSView {
             CATransaction.commit()
         }
         switch content {
-        case let v as ExpandedView: v.update()
+        case let v as ExpandedView:
+            v.update()
+            if let flyFrom { v.flyTitle(of: flyFrom.id, from: flyFrom.rect, in: self) }
         case let v as NeedsYouView: if let e = event { v.configure(e) }
         case let v as FinishedView: if let e = event { v.configure(e) }
         default: break
@@ -220,6 +436,101 @@ final class NotchRootView: NSView {
 
     /// Open (list or card): every store change updates it; collapsed only on visible changes.
     var isInteractive: Bool { content != nil }
+}
+
+// MARK: - Split island
+
+/// The little island beside the notch for something that needs you while other threads work.
+/// It buds off the notch's edge like a droplet splitting off; click it for the card.
+@MainActor
+final class SplitBubble: NSView {
+    private let shape = CAShapeLayer()
+    private let pulse = LayerDots(dots: 1)
+    private let count = NSTextField(labelWithString: "")
+    private var shown = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        shape.fillColor = (Theme.current.background ?? .black).cgColor
+        layer?.addSublayer(shape)
+        count.font = UI.rounded(13, .semibold)
+        [pulse, count].forEach(addSubview)
+        isHidden = true
+        toolTip = "Needs you: click to answer"
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil } // clicks go to the root view
+
+    func configure(count n: Int, status: ThreadStatus) {
+        pulse.configure(color: status.color, size: 7, style: .pulse)
+        count.stringValue = "\(n)"
+        count.textColor = status.color
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        let b = bounds
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shape.frame = b
+        shape.path = NotchShape.path(size: b.size, topRadius: 6, bottomRadius: b.height / 2)
+        CATransaction.commit()
+        let ch = ceil(count.intrinsicContentSize.height)
+        let cw = ceil(count.attributedStringValue.size().width) + 4
+        let total = 16 + 3 + cw
+        let x = ((b.width - total) / 2).rounded()
+        pulse.frame = CGRect(x: x, y: (b.height - 16) / 2, width: 16, height: 16)
+        count.frame = CGRect(x: x + 19, y: ((b.height - ch) / 2).rounded(), width: cw, height: ch)
+    }
+
+    func setVisible(_ visible: Bool, travel: CGFloat, delay: Double = 0) {
+        guard visible != shown, let l = layer else { return }
+        shown = visible
+        let start = CACurrentMediaTime() + (visible ? delay : 0)
+        let slide = NotchRootView.spring("transform.translation.x", damping: visible ? 0.68 : 0.9)
+        slide.isAdditive = true
+        let squeeze = NotchRootView.spring("transform.scale", damping: visible ? 0.68 : 0.9)
+        squeeze.isAdditive = false
+        if visible {
+            isHidden = false
+            slide.fromValue = -travel
+            slide.toValue = 0
+            squeeze.fromValue = 0.3
+            squeeze.toValue = 1
+            let appear = CABasicAnimation(keyPath: "opacity")
+            appear.fromValue = 0
+            appear.toValue = 1
+            appear.duration = 0.16
+            for a in [slide, squeeze, appear] as [CAAnimation] {
+                a.beginTime = start
+                a.fillMode = .backwards // hidden behind the notch until it starts
+                l.add(a, forKey: a === slide ? "slide" : a === squeeze ? "squeeze" : "appear")
+            }
+            alphaValue = 1
+        } else {
+            slide.fromValue = 0
+            slide.toValue = -travel
+            slide.fillMode = .forwards
+            slide.isRemovedOnCompletion = false
+            CATransaction.begin()
+            CATransaction.setCompletionBlock { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, !self.shown else { return }
+                    self.isHidden = true
+                    self.layer?.removeAnimation(forKey: "slide")
+                }
+            }
+            l.add(slide, forKey: "slide")
+            NSAnimationContext.runAnimationGroup { $0.duration = 0.2; animator().alphaValue = 0 }
+            CATransaction.commit()
+        }
+    }
 }
 
 // MARK: - Compact bar
@@ -235,10 +546,11 @@ final class CompactBar: NSView {
     private let featured = NSView()          // slides as a unit when the featured thread changes
     private let title = CompactBar.label(.systemFont(ofSize: 12, weight: .semibold))
     private let icon = NSImageView()
-    private let activity = CompactBar.label(.systemFont(ofSize: 11))
-    private let diff = CompactBar.label(.monospacedDigitSystemFont(ofSize: 11, weight: .semibold))
-    private let timer = CompactBar.label(.monospacedDigitSystemFont(ofSize: 11, weight: .medium))
-    private let count = CompactBar.label(CompactBar.rounded(13, .semibold))
+    private let marquee = Marquee()
+    private var activity: NSTextField { marquee.label }
+    private let diff = CompactBar.label(UI.rounded(11, .semibold))
+    private let timer = CompactBar.label(UI.rounded(11, .medium))
+    private let count = CompactBar.label(UI.rounded(13, .semibold))
     private let pages = PageDotsLayer()
 
     private var tick: Timer?
@@ -259,7 +571,7 @@ final class CompactBar: NSView {
         icon.imageScaling = .scaleProportionallyDown
         addSubview(indicator)
         addSubview(featured)
-        [title, icon, activity].forEach(featured.addSubview)
+        [title, icon, marquee].forEach(featured.addSubview)
         [diff, timer, count].forEach(addSubview)
         layer?.addSublayer(pages)
         alphaValue = 0
@@ -279,9 +591,16 @@ final class CompactBar: NSView {
         return l
     }
 
-    private static func rounded(_ size: CGFloat, _ weight: NSFont.Weight) -> NSFont {
-        let base = NSFont.systemFont(ofSize: size, weight: weight)
-        return base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: size) } ?? base
+    /// The thread the bar shows right now (for flying its title into the list).
+    var featuredId: String? { isHidden || alphaValue == 0 ? nil : shownId }
+    /// The thread it showed last, even while hidden under the open list (for flying back).
+    var lastFeaturedId: String? { shownId }
+
+    func titleRect(in view: NSView) -> CGRect { title.convert(title.bounds, to: view) }
+
+    func flyTitle(from rect: CGRect, in view: NSView) {
+        let now = titleRect(in: view)
+        UI.fly(featured, from: CGSize(width: rect.minX - now.minX, height: rect.minY - now.minY))
     }
 
     // MARK: Visibility + clock
@@ -309,19 +628,29 @@ final class CompactBar: NSView {
 
     private func onTick() {
         ticks += 1
-        if ticks % 4 == 0 { index += 1 }
+        // Next thread every 4s, but let a long activity finish scrolling first.
+        if ticks >= 4, !marquee.isScrolling {
+            ticks = 0
+            index += 1
+        }
         update()
     }
 
     // MARK: Content
 
     func update() {
-        let active = store.active
+        let active = model.compactThreads
         guard !active.isEmpty else { return }
         let current = active[index % active.count]
-        let lead = leadStatus(active)
+        let lead = model.leadStatus ?? .working
 
-        indicator.show(lead, small: false)
+        // Working: the featured thread's own logo sweeps (the busiest thread's, if it's idle).
+        let busy = current.status.isBusy ? current : active.first { $0.status.isBusy }
+        let provider: String?? = busy.map { $0.provider }
+        // Something that needs you leads; otherwise the indicator follows the thread on show
+        // (a waiting one drifts instead of sweeping).
+        let urgent = lead.needsYou || lead == .guestRequest
+        indicator.show(urgent || !current.status.isBusy ? lead : current.status, small: false, provider: provider)
 
         // Featured thread changed: spring-slide the whole line up (render-server animation).
         if current.id != shownId {
@@ -334,6 +663,7 @@ final class CompactBar: NSView {
         activity.stringValue = current.activity ?? current.status.label
         activity.font = current.activityIcon == "terminal"
             ? .monospacedSystemFont(ofSize: 11, weight: .regular) : .systemFont(ofSize: 11)
+        activity.lineBreakMode = .byClipping // the marquee scrolls it instead of cutting it off
         let color = current.status.color.withAlphaComponent(0.9)
         activity.textColor = color
         icon.image = NSImage(systemSymbolName: current.activityIcon, accessibilityDescription: nil)?
@@ -360,14 +690,9 @@ final class CompactBar: NSView {
         layoutRow()
     }
 
-    private func leadStatus(_ active: [T3Thread]) -> ThreadStatus {
-        let order: [ThreadStatus] = [.pendingApproval, .awaitingInput, .guestRequest, .working, .connecting, .waiting]
-        return order.first { s in active.contains { $0.status == s } } ?? .working
-    }
-
     private func timerText(_ t: T3Thread) -> NSAttributedString {
         let out = NSMutableAttributedString()
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        let font = UI.rounded(11, .medium)
         if t.status.isBusy, let start = t.startedAt {
             if t.status != .working {
                 out.append(.init(string: t.status.label + " ", attributes: [.font: font, .foregroundColor: t.status.color]))
@@ -383,7 +708,7 @@ final class CompactBar: NSView {
     }
 
     private static func diffText(_ d: (Int, Int)) -> NSAttributedString {
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        let font = UI.rounded(11, .semibold)
         let out = NSMutableAttributedString(string: "+\(d.0)", attributes: [
             .font: font, .foregroundColor: Palette.added.withAlphaComponent(0.9)])
         out.append(.init(string: " −\(d.1)", attributes: [
@@ -408,7 +733,7 @@ final class CompactBar: NSView {
 
         // Padded from the shape's straight side (the top corners flare in by 6pt).
         let inset = model.sideInset(for: .activity)
-        indicator.frame = CGRect(x: inset - 2, y: (h - 16) / 2, width: 22, height: 16) // dots are inset ~2pt in their box
+        indicator.frame = CGRect(x: inset - 2, y: ((h - 17) / 2).rounded(), width: 22, height: 17) // fits the 17pt pixel logo
 
         // Right edge: count, page dots, timer, diff (right to left).
         var right = bounds.width - inset
@@ -435,18 +760,19 @@ final class CompactBar: NSView {
             if dw > 0 { place(diff, x: left + titleW + 8, w: dw, vh: 14) }
             let room = featured.frame.width - wingStart - 15
             icon.isHidden = room < 40
-            activity.isHidden = room < 40
+            marquee.isHidden = room < 40
             place(icon, x: wingStart, w: 11, vh: 11)
-            place(activity, x: wingStart + 15, w: room, vh: 14)
+            place(marquee, x: wingStart + 15, w: room, vh: ceil(activity.intrinsicContentSize.height))
         } else {
             icon.isHidden = false
-            activity.isHidden = false
+            marquee.isHidden = false
             let room = featured.frame.width
             let titleW = min(fit(title), room * 0.55)
             place(title, x: 0, w: titleW, vh: 15)
             place(icon, x: titleW + 8, w: 11, vh: 11)
-            place(activity, x: titleW + 23, w: room - titleW - 23, vh: 14)
+            place(marquee, x: titleW + 23, w: room - titleW - 23, vh: ceil(activity.intrinsicContentSize.height))
         }
+        marquee.run()
     }
 
     // MARK: Spring transitions (run in the window server)
@@ -472,18 +798,20 @@ final class CompactBar: NSView {
 
 // MARK: - Indicator + page dots
 
-/// Status glyph: dots (working / connecting), breathing dot (needs you), an icon for the
-/// rest, nothing for idle. Dots and pulse are Core Animation.
+/// Status glyph: the provider's pixel logo sweeping (working / connecting, when the provider is
+/// given; three dots otherwise), breathing dot (needs you), an icon for the rest, nothing for
+/// idle. All Core Animation.
 @MainActor
 final class StatusIndicator: NSView {
     private let dots = LayerDots(dots: 3)
     private let pulse = LayerDots(dots: 1)
     private let icon = NSImageView()
-    private var shown: (ThreadStatus, Bool)?
+    private let pixel = PixelGlyph()
+    private var shown: (ThreadStatus, Bool, String??)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        [dots, pulse, icon].forEach(addSubview)
+        [dots, pulse, icon, pixel].forEach(addSubview)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -491,13 +819,24 @@ final class StatusIndicator: NSView {
     override func layout() {
         super.layout()
         [dots, pulse, icon].forEach { $0.frame = bounds }
+        let side = min(bounds.width, bounds.height)
+        pixel.frame = CGRect(x: (bounds.width - side) / 2, y: (bounds.height - side) / 2, width: side, height: side)
     }
 
-    func show(_ status: ThreadStatus, small: Bool) {
-        if let s = shown, s.0 == status, s.1 == small { return }
-        shown = (status, small)
+    /// `provider`: whose pixel logo sweeps while busy (`.some(nil)`: unknown provider, a plain
+    /// block); leave it out for the three dots.
+    func show(_ status: ThreadStatus, small: Bool, provider: String?? = nil) {
+        if let s = shown, s.0 == status, s.1 == small, s.2 == provider { return }
+        shown = (status, small, provider)
         let color = status.color
-        dots.isHidden = !(status == .working || status == .connecting)
+        let busy = status == .working || status == .connecting
+        // With a provider, working sweeps its pixel logo and waiting drifts a soft band over it.
+        let logo = (busy || status == .waiting) && provider != nil
+        pixel.isHidden = !logo
+        if logo, let provider {
+            pixel.configure(provider: provider, motion: status == .waiting ? .wave : .sweep(slow: status == .connecting))
+        }
+        dots.isHidden = !busy || provider != nil
         pulse.isHidden = !(status.needsYou || status == .guestRequest)
         let symbol: String? = switch status {
         case .waiting: "hourglass"
@@ -506,7 +845,7 @@ final class StatusIndicator: NSView {
         case .completed: "checkmark.circle.fill"
         default: nil
         }
-        icon.isHidden = symbol == nil
+        icon.isHidden = symbol == nil || logo
         if let symbol {
             icon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: status.label)?
                 .withSymbolConfiguration(.init(pointSize: small ? 11 : 12, weight: .semibold))
@@ -648,5 +987,91 @@ final class LayerDots: NSView {
             breathe.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             halo.add(breathe, forKey: "pulse")
         }
+    }
+}
+
+// MARK: - Marquee
+
+/// A one-line label that, when its text doesn't fit, waits a beat, glides to the end, rests,
+/// and glides back, instead of cutting the text off with "…". Core Animation; it restarts only
+/// when the text or the room changes, so the bar's 1s tick doesn't reset it.
+///
+/// Callers style `label` (text, font, color); the line is drawn by a CATextLayer, because AppKit
+/// only draws the part of a text field visible in its clip, so sliding the field itself revealed
+/// blank space past the first few words.
+@MainActor
+final class Marquee: NSView {
+    let label = NSTextField(labelWithString: "")
+    private let text = CATextLayer()
+    private let fade = CAGradientLayer()
+    private var lastRun: (text: String, width: CGFloat)?
+    /// When the current scroll ends; the bar holds its rotation until then.
+    private(set) var busyUntil: CFTimeInterval = 0
+    var isScrolling: Bool { CACurrentMediaTime() < busyUntil }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.masksToBounds = true
+        label.isHidden = true // style and metrics only
+        addSubview(label)
+        text.anchorPoint = .zero
+        text.truncationMode = .none
+        text.isWrapped = false
+        layer?.addSublayer(text)
+        fade.startPoint = CGPoint(x: 0, y: 0.5)
+        fade.endPoint = CGPoint(x: 1, y: 0.5)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var isFlipped: Bool { true }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        text.contentsScale = window?.backingScaleFactor ?? 2
+    }
+
+    func run() {
+        let font = label.font ?? .systemFont(ofSize: 11)
+        let line = NSAttributedString(string: label.stringValue, attributes: [
+            .font: font, .foregroundColor: label.textColor ?? .white])
+        let textWidth = label.stringValue.isEmpty ? 0 : ceil(line.size().width) + 2
+        let room = bounds.width
+        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        text.contentsScale = window?.backingScaleFactor ?? 2
+        text.string = line
+        text.frame = CGRect(x: 0, y: ((bounds.height - lineHeight) / 2).rounded(), width: max(textWidth, room), height: lineHeight)
+        CATransaction.commit()
+        guard lastRun?.text != label.stringValue || lastRun?.width != room else { return }
+        lastRun = (label.stringValue, room)
+        text.removeAnimation(forKey: "marquee")
+        busyUntil = 0
+        let overflow = textWidth - room
+        guard overflow > 1, room > 24 else { layer?.mask = nil; return }
+
+        // A soft right edge while the text runs past it.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fade.frame = bounds
+        fade.colors = [NSColor.white.cgColor, NSColor.white.cgColor, NSColor.clear.cgColor]
+        fade.locations = [0, NSNumber(value: Double(max(0, 1 - 16 / room))), 1]
+        layer?.mask = fade
+        CATransaction.commit()
+
+        let distance = overflow + 16 // clear of the fade at the end
+        // ~30pt/s reads comfortably; very long commands go faster so a scroll never passes ~8s.
+        let wait = 1.2, glide = min(max(Double(distance) / 30, 0.6), 8), rest = 1.4, back = 0.45
+        let total = wait + glide + rest + back
+        let scroll = CAKeyframeAnimation(keyPath: "transform.translation.x")
+        scroll.values = [0, 0, -distance, -distance, 0]
+        scroll.keyTimes = [0, wait / total, (wait + glide) / total, (wait + glide + rest) / total, 1].map { NSNumber(value: $0) }
+        scroll.timingFunctions = [.init(name: .linear), .init(name: .easeInEaseOut), .init(name: .linear), .init(name: .easeInEaseOut)]
+        scroll.duration = total
+        scroll.isAdditive = true
+        text.add(scroll, forKey: "marquee")
+        busyUntil = CACurrentMediaTime() + total
     }
 }

@@ -73,6 +73,8 @@ final class NotchModel: ObservableObject {
     static let replyHeight: CGFloat = 44
     static let hintsHeight: CGFloat = 24
     static let wing: CGFloat = 190 // side area next to the hardware notch in activity mode
+    static let bubbleGap: CGFloat = 6
+    static let bubbleWidth: CGFloat = 58
 
     init(notchSize: CGSize, hardwareNotch: Bool, store: ThreadStore) {
         self.notchSize = notchSize
@@ -88,6 +90,25 @@ final class NotchModel: ObservableObject {
         if store.event != nil { return .peek }
         if !store.active.isEmpty { return .activity }
         return .idle
+    }
+
+    /// Something needs you while other threads work, and its card was put away: it gets its own
+    /// little island beside the notch (like iOS with two live activities), and the bar keeps
+    /// showing the work instead of fighting over one slot.
+    var splitNeedsYou: Bool {
+        mode == .activity && !store.needsYou.isEmpty && store.active.contains { !$0.status.needsYou }
+    }
+
+    /// What the collapsed bar rotates through.
+    var compactThreads: [T3Thread] {
+        splitNeedsYou ? store.active.filter { !$0.status.needsYou } : store.active
+    }
+
+    /// The status the collapsed bar (and its glow) leads with.
+    var leadStatus: ThreadStatus? {
+        let order: [ThreadStatus] = [.pendingApproval, .awaitingInput, .guestRequest, .working, .connecting, .waiting]
+        let threads = compactThreads
+        return order.first { s in threads.contains { $0.status == s } }
     }
 
     var size: CGSize {
@@ -154,7 +175,7 @@ final class NotchModel: ObservableObject {
     /// Everything the collapsed notch draws. While collapsed, store changes that leave this
     /// equal (tool counts, idle rows, timestamps) skip the redraw entirely.
     var renderKey: [AnyHashable] {
-        var key: [AnyHashable] = [mode, store.connected, store.incompatible, store.eventId]
+        var key: [AnyHashable] = [mode, store.connected, store.incompatible, store.eventId, splitNeedsYou]
         guard mode == .activity || mode == .idle else { return key + [UUID()] } // always redraw
         for t in store.active {
             key += [t.id, t.title, t.status, t.activity, t.activityIcon, t.linesAdded, t.linesRemoved, t.startedAt]
