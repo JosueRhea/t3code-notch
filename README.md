@@ -58,7 +58,7 @@ The original build can't be re-run, so its numbers are the ones recorded at the 
 - **At a glance:** branch, model with the provider's logo, PR number with CI checks / review / conflict markers, and a usage-limit countdown.
 - **Keyboard:** ⌘⇧Space opens it; ↑↓ select, ⏎ open, R reply, A/D approve/deny, 1–9 answer, Esc close.
 - **Matches your T3 theme:** background, buttons, cards, the glow and the Working color follow T3's palette (T3 Chat, Grove, Ocean, Ember, Iris) live. Around a camera notch the top stays black and fades into the theme color. Pick one yourself under Theme in the menu.
-- **Cozy sounds:** a soft click when a run finishes, a tick-tock when an agent needs you.
+- **Cozy sounds:** a soft chime when a run finishes, a tick-tock when an agent needs you.
 - **Private by default:** invisible to screen sharing, recordings and screenshots (toggle in the menu).
 - **Light on resources:** AppKit + Core Animation, no SwiftUI. Under 1% CPU while agents run, and no memory growth (see [Performance](#performance)).
 
@@ -98,4 +98,4 @@ The menu-bar icon has the settings: which display(s) to show it on, sounds, scre
 - `scripts/extract-logos.py /path/to/t3code` refreshes the provider logos from T3 Code's sources.
 - `scripts/make-icon.swift` regenerates the app icon.
 
-Provider logos are the ones T3 Code ships and belong to their respective owners. This project isn't affiliated with T3 Tools.
+The finish sound is the "classic" sound from [Hex](https://github.com/anomalyco/hex) (MIT, © Christopher Langton; license in `Resources/Sounds/LICENSE-hex`). Provider logos are the ones T3 Code ships and belong to their respective owners. This project isn't affiliated with T3 Tools.
