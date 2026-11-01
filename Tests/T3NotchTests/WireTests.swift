@@ -98,3 +98,10 @@ import Testing
         #expect(Incoming.lineCounts(diffStr: "not a diff") == nil)
     }
 }
+
+@Suite struct MessageTextTests {
+    @Test func markdownIsFlattenedForReading() {
+        let text = "## Done\n- I pushed **everything** as `b5a7887` to [t3code-notch](https://github.com/x/t3code-notch).\n```swift\ncode\n```"
+        #expect(ThreadStore.firstLines(text) == "Done I pushed everything as b5a7887 to t3code-notch.")
+    }
+}

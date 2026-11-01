@@ -810,12 +810,21 @@ final class ThreadStore: ObservableObject {
     }
 
     /// Message text flattened to a short paragraph (markdown noise stripped).
-    private static func firstLines(_ s: String) -> String {
+    nonisolated static func firstLines(_ s: String) -> String {
+        var inCode = false
         let lines = s.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty && !$0.hasPrefix("```") && !$0.hasPrefix("|") }
+            .filter { line in
+                if line.hasPrefix("```") { inCode.toggle(); return false } // whole code blocks, not just fences
+                return !inCode && !line.isEmpty && !line.hasPrefix("|")
+            }
+            // Headings and bullets: keep the words, drop the markers.
+            .map { $0.replacingOccurrences(of: #"^(#{1,6}|[-*+])\s+"#, with: "", options: .regularExpression) }
         return lines.prefix(3).joined(separator: " ")
+            // [text](url) -> text: a link is read, not clicked, here (and on the Lock Screen).
+            .replacingOccurrences(of: #"\[([^\]]+)\]\([^)\s]+\)"#, with: "$1", options: .regularExpression)
             .replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "__", with: "")
             .replacingOccurrences(of: "`", with: "")
     }
 
