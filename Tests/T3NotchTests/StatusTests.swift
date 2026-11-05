@@ -176,6 +176,16 @@ import Testing
         #expect(t.parentId == "parent")
     }
 
+    @Test func forksAreTopLevelLikeInT3sSidebar() {
+        let fork = shell(["status": "running", "activityRunStatus": "running",
+                          "lineage": ["parentThreadId": "parent", "relationshipToParent": "fork", "rootThreadId": "root"]])
+        #expect(!fork.isChild)
+        let subagent = shell(["lineage": ["parentThreadId": "parent", "relationshipToParent": "subagent"]])
+        #expect(subagent.isChild)
+        let sideChat = shell(["lineage": ["parentThreadId": "parent", "relationshipToParent": "fork", "sideChat": true]])
+        #expect(sideChat.isChild)
+    }
+
     @Test func providerNativeSubagentDoesNotForward() {
         let t = shell(["status": "running", "activityRunStatus": "running", "creationSource": "provider",
                        "lineage": ["parentThreadId": "parent", "relationshipToParent": "subagent"],

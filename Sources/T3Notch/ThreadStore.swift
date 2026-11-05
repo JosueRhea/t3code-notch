@@ -1177,7 +1177,9 @@ enum Incoming: Sendable {
             pullRequest: prText,
             pendingRequestId: pending?["id"] as? String,
             provider: provider(t),
-            isChild: lineage?["parentThreadId"] as? String != nil,
+            // T3's sidebar: forks (and handoffs) are threads of their own; only subagents and
+            // side chats live under their parent.
+            isChild: lineage?["parentThreadId"] as? String != nil && (isSubagent || lineage?["sideChat"] as? Bool == true),
             archived: t["archivedAt"] is String,
             deleted: t["deletedAt"] is String,
             parentId: lineage?["parentThreadId"] as? String,
